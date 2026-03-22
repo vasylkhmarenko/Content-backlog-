@@ -2,14 +2,19 @@
 """Content Backlog Agent — turns any content or link into Instagram, YouTube & Threads ideas."""
 
 import json
+import os
 import re
+import subprocess
 import sys
+import tempfile
 import urllib.request
 import urllib.parse
 from datetime import datetime
 from pathlib import Path
 
 BACKLOG_FILE = Path("backlog.json")
+COOKIES_FILE = Path("cookies.txt")
+WHISPER_MODEL = "base"  # tiny | base | small | medium | large
 
 SYSTEM_PROMPT = """You are a creative content strategist for a personal creator.
 
@@ -49,120 +54,121 @@ def save_backlog(backlog: list) -> None:
     BACKLOG_FILE.write_text(json.dumps(backlog, indent=2, ensure_ascii=False))
 
 
-# ── Social media metadata fetchers ────────────────────────────────────────────
+# ── yt-dlp helpers ────────────────────────────────────────────────────────────
 
-def _fetch_url(url: str, timeout: int = 8) -> str | None:
+def _yt_dlp_base_cmd() -> list[str]:
+    cmd = ["yt-dlp", "--no-check-certificates"]
+    if COOKIES_FILE.exists():
+        cmd += ["--cookies", str(COOKIES_FILE)]
+    return cmd
+
+
+def fetch_metadata(url: str) -> dict | None:
+    """Extract title, description, uploader via yt-dlp --dump-json."""
+    cmd = _yt_dlp_base_cmd() + ["--dump-json", "--no-download", url]
     try:
-        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
-        with urllib.request.urlopen(req, timeout=timeout) as r:
-            return r.read().decode("utf-8", errors="ignore")
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+        if result.returncode == 0:
+            return json.loads(result.stdout)
     except Exception:
-        return None
-
-
-def fetch_tiktok_meta(url: str) -> str | None:
-    """TikTok has a public oEmbed endpoint — returns title + author."""
-    oembed = f"https://www.tiktok.com/oembed?url={urllib.parse.quote(url)}"
-    raw = _fetch_url(oembed)
-    if not raw:
-        return None
-    try:
-        data = json.loads(raw)
-        title = data.get("title", "")
-        author = data.get("author_name", "")
-        return f"TikTok by @{author}: {title}" if title else None
-    except Exception:
-        return None
-
-
-def fetch_instagram_meta(url: str) -> str | None:
-    """Try Instagram's embed page to extract caption text."""
-    # Extract shortcode from URL
-    match = re.search(r"/(reel|p)/([A-Za-z0-9_-]+)", url)
-    if not match:
-        return None
-    shortcode = match.group(2)
-    embed_url = f"https://www.instagram.com/reel/{shortcode}/embed/"
-    raw = _fetch_url(embed_url)
-    if not raw:
-        return None
-    # Pull caption from embed HTML
-    cap = re.search(r'class="Caption"[^>]*>(.*?)</div>', raw, re.DOTALL)
-    if cap:
-        text = re.sub(r"<[^>]+>", "", cap.group(1)).strip()
-        if text:
-            return f"Instagram Reel caption: {text[:500]}"
+        pass
     return None
 
 
-def fetch_youtube_meta(url: str) -> str | None:
-    """YouTube oEmbed for title."""
-    oembed = f"https://www.youtube.com/oembed?url={urllib.parse.quote(url)}&format=json"
-    raw = _fetch_url(oembed)
-    if not raw:
-        return None
+def transcribe_audio(url: str) -> str | None:
+    """Download audio from URL and transcribe with Whisper."""
     try:
-        data = json.loads(raw)
-        title = data.get("title", "")
-        author = data.get("author_name", "")
-        return f"YouTube video by {author}: {title}" if title else None
-    except Exception:
+        import whisper
+    except ImportError:
+        print("   ⚠️  Whisper not installed. Run: pip install openai-whisper")
         return None
 
+    with tempfile.TemporaryDirectory() as tmpdir:
+        audio_path = os.path.join(tmpdir, "audio.%(ext)s")
+        cmd = _yt_dlp_base_cmd() + [
+            "--extract-audio",
+            "--audio-format", "mp3",
+            "--audio-quality", "5",
+            "-o", audio_path,
+            url,
+        ]
+        try:
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+            if result.returncode != 0:
+                print(f"   ⚠️  Download failed: {result.stderr[:200]}")
+                return None
+        except Exception as e:
+            print(f"   ⚠️  Download error: {e}")
+            return None
 
-def detect_and_fetch(url: str) -> str | None:
-    """Try to extract meaningful text from a social media URL."""
-    u = url.lower()
-    if "tiktok.com" in u:
-        return fetch_tiktok_meta(url)
-    if "instagram.com" in u:
-        return fetch_instagram_meta(url)
-    if "youtube.com" in u or "youtu.be" in u:
-        return fetch_youtube_meta(url)
-    return None
+        # Find the downloaded file
+        mp3_files = list(Path(tmpdir).glob("*.mp3"))
+        if not mp3_files:
+            return None
+
+        print(f"   🎙️  Transcribing with Whisper ({WHISPER_MODEL})...")
+        model = whisper.load_model(WHISPER_MODEL)
+        result = model.transcribe(str(mp3_files[0]))
+        return result.get("text", "").strip()
 
 
-# ── Claude API processing (requires ANTHROPIC_API_KEY) ───────────────────────
+def extract_content(url: str) -> tuple[str, str]:
+    """
+    Returns (content_text, method_used).
+    Tries: metadata description → Whisper transcription.
+    """
+    print("   📋 Fetching metadata...")
+    meta = fetch_metadata(url)
 
-def process_with_api(content: str) -> dict | None:
+    if meta:
+        title = meta.get("title", "")
+        description = meta.get("description", "") or meta.get("caption", "")
+        uploader = meta.get("uploader", "") or meta.get("channel", "")
+
+        parts = []
+        if uploader:
+            parts.append(f"Creator: @{uploader}")
+        if title:
+            parts.append(f"Title: {title}")
+        if description:
+            parts.append(f"Caption/Description: {description[:800]}")
+
+        if parts:
+            return "\n".join(parts), "metadata"
+
+    # Fall back to Whisper
+    print("   🎵 No description found — transcribing audio...")
+    transcript = transcribe_audio(url)
+    if transcript:
+        return f"Audio transcript:\n{transcript}", "whisper"
+
+    return "", "failed"
+
+
+# ── Idea generation ───────────────────────────────────────────────────────────
+
+def generate_ideas_api(content: str) -> dict | None:
+    """Use Claude API if ANTHROPIC_API_KEY is set."""
+    if not os.environ.get("ANTHROPIC_API_KEY"):
+        return None
     try:
         import anthropic
     except ImportError:
         return None
 
     client = anthropic.Anthropic()
-    is_url = content.strip().startswith(("http://", "https://"))
-
-    if is_url:
-        meta = detect_and_fetch(content)
-        if meta:
-            user_message = f"Generate content ideas for my backlog based on this:\n\n{meta}\n\nOriginal URL: {content}"
-            tools = None
-        else:
-            user_message = f"Fetch and analyze this URL, then generate content ideas: {content}"
-            tools = [{"type": "web_fetch_20260209", "name": "web_fetch"}]
-    else:
-        user_message = f"Analyze this and generate platform-specific ideas:\n\n{content}"
-        tools = None
-
-    messages = [{"role": "user", "content": user_message}]
+    messages = [{"role": "user", "content": f"Generate content ideas for my backlog:\n\n{content}"}]
 
     while True:
-        kwargs: dict = dict(
+        response = client.messages.create(
             model="claude-opus-4-6",
             max_tokens=4096,
             system=SYSTEM_PROMPT,
             messages=messages,
         )
-        if tools:
-            kwargs["tools"] = tools
-
-        response = client.messages.create(**kwargs)
-
         if response.stop_reason == "pause_turn":
             messages.append({"role": "assistant", "content": response.content})
             continue
-
         for block in response.content:
             if block.type == "text":
                 text = block.text.strip()
@@ -173,12 +179,8 @@ def process_with_api(content: str) -> dict | None:
                 try:
                     return json.loads(text)
                 except json.JSONDecodeError:
-                    return {
-                        "source_summary": text,
-                        "ideas": {"instagram": [], "youtube": [], "threads": []},
-                    }
+                    return {"source_summary": text, "ideas": {"instagram": [], "youtube": [], "threads": []}}
         break
-
     return None
 
 
@@ -196,13 +198,7 @@ def print_entry(entry: dict) -> None:
         print(f"↳ {entry['source_summary']}")
 
     ideas = entry.get("ideas", {})
-    platforms = [
-        ("instagram", "📸 Instagram"),
-        ("youtube", "🎥 YouTube"),
-        ("threads", "🧵 Threads"),
-    ]
-
-    for key, label in platforms:
+    for key, label in [("instagram", "📸 Instagram"), ("youtube", "🎥 YouTube"), ("threads", "🧵 Threads")]:
         items = ideas.get(key, [])
         if items:
             print(f"\n  {label}")
@@ -229,31 +225,41 @@ def cmd_list() -> None:
 def cmd_add(content: str) -> None:
     is_url = content.strip().startswith(("http://", "https://"))
 
-    # Try to fetch social media metadata first
-    meta = None
     if is_url:
-        print("⏳ Fetching metadata...")
-        meta = detect_and_fetch(content)
-        if meta:
-            print(f"   {meta[:120]}")
+        if not COOKIES_FILE.exists():
+            print("⚠️  cookies.txt not found.")
+            print("   1. Install: https://chromewebstore.google.com/detail/get-cookiestxt-locally/cclelndahbckbenkjhflpdbgdldlbecc")
+            print("   2. Go to instagram.com (logged in) → export cookies.txt")
+            print(f"   3. Drop cookies.txt in: {Path.cwd()}")
+            print("\n   Or describe the content and I'll generate ideas directly.")
+            return
 
-    import os
-    if os.environ.get("ANTHROPIC_API_KEY"):
-        print("⏳ Generating ideas via API...")
-        data = process_with_api(content)
+        print(f"⏳ Processing {content[:60]}...")
+        extracted, method = extract_content(content)
+
+        if not extracted:
+            print("❌ Could not extract content. Try describing it manually.")
+            return
+
+        print(f"   ✓ Got content via {method}\n")
+        data = generate_ideas_api(extracted)
+
+        if not data:
+            # Print extracted content for in-session use
+            print("── Extracted content (paste this to Claude Code for ideas) ──")
+            print(extracted)
+            print("─" * 60)
+            return
+
+        _write_entry(content, data)
+    else:
+        # Plain text — generate via API or print for in-session use
+        data = generate_ideas_api(content)
         if data:
             _write_entry(content, data)
-            return
-        print("❌ API call failed.")
-    else:
-        # No API key — print what we have so the user can get ideas from Claude Code session
-        if meta:
-            print("\n💡 Metadata fetched. Paste this into your Claude Code chat to get ideas:\n")
-            print(f"   {meta}")
         else:
-            print("\n⚠️  No ANTHROPIC_API_KEY set and couldn't fetch metadata automatically.")
-            print("   Describe the content in your Claude Code chat and ask for backlog ideas.")
-            print("   Then run: python agent.py save '<json>'")
+            print("── Send this to Claude Code for ideas ──")
+            print(content)
 
 
 def cmd_save(json_str: str) -> None:
@@ -293,7 +299,6 @@ def interactive() -> None:
         except (EOFError, KeyboardInterrupt):
             print("\nBye!")
             break
-
         if not content:
             continue
         if content.lower() in ("quit", "exit", "q"):
@@ -307,7 +312,6 @@ def interactive() -> None:
 
 def main() -> None:
     args = sys.argv[1:]
-
     if not args:
         interactive()
     elif args[0] == "list":
