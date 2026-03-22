@@ -1,5 +1,15 @@
 #!/usr/bin/env python3
-"""Reel → Transcript24 → Ukrainian Scenario → Airtable"""
+"""Video URL / local file → Transcript → Ukrainian Scenario → Airtable
+
+Supported inputs:
+  - YouTube, TikTok, Twitter/X, Facebook, Vimeo, etc. (any yt-dlp source)
+  - Direct video URL (.mp4, .mov, .webm …)
+  - Local file path  (/path/to/video.mp4)
+
+Instagram note: Instagram blocks server IPs.
+  Workaround: download reel on your phone → upload to Google Drive/Dropbox
+  → copy direct download link → pass here.
+"""
 
 import json
 import os
@@ -33,28 +43,81 @@ SCENARIO_PROMPT = """Ти — експерт зі створення вірус�
 [Фінальна фраза + що зробити глядачу.]"""
 
 
-# ── Step 1: transcribe via yt-dlp + faster-whisper ───────────────────────────
+# ── helpers ───────────────────────────────────────────────────────────────────
 
-def transcribe(reel_url: str) -> str | None:
+def _is_local(source: str) -> bool:
+    return os.path.exists(source)
+
+
+def _is_direct_video(url: str) -> bool:
+    """True for plain .mp4/.mov/.webm/etc. URLs (no JS needed)."""
+    VIDEO_EXTS = (".mp4", ".mov", ".webm", ".mkv", ".avi", ".m4v")
+    path = url.split("?")[0].lower()
+    return any(path.endswith(ext) for ext in VIDEO_EXTS)
+
+
+def _download_direct(url: str, dest: str) -> bool:
+    """Download a plain video URL with progress."""
+    print("   📥 Downloading direct video URL...")
+    try:
+        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+        with urllib.request.urlopen(req) as resp, open(dest, "wb") as f:
+            total = int(resp.headers.get("Content-Length", 0))
+            downloaded = 0
+            while chunk := resp.read(1 << 16):
+                f.write(chunk)
+                downloaded += len(chunk)
+                if total:
+                    pct = downloaded * 100 // total
+                    print(f"\r   {pct}%", end="", flush=True)
+        print()
+        return True
+    except Exception as e:
+        print(f"   ❌ Download error: {e}")
+        return False
+
+
+# ── Step 1: get audio / video file, then transcribe ──────────────────────────
+
+def transcribe(source: str) -> str | None:
     import tempfile
     import subprocess
     from faster_whisper import WhisperModel
 
     with tempfile.TemporaryDirectory() as tmpdir:
-        audio_path = f"{tmpdir}/audio.mp3"
+        audio_path = os.path.join(tmpdir, "audio.mp3")
 
-        print("   📥 Downloading audio...")
-        result = subprocess.run(
-            ["yt-dlp", "-x", "--audio-format", "mp3", "-o", audio_path, reel_url],
-            capture_output=True, text=True,
-        )
-        if result.returncode != 0:
-            print(f"   ❌ yt-dlp error: {result.stderr.strip()}")
-            return None
+        if _is_local(source):
+            # Local file — transcribe directly (no download needed)
+            print("   📂 Using local file...")
+            input_path = source
+        elif _is_direct_video(source):
+            # Plain video URL — download ourselves
+            video_path = os.path.join(tmpdir, "video.mp4")
+            ok = _download_direct(source, video_path)
+            if not ok:
+                return None
+            input_path = video_path
+        else:
+            # yt-dlp handles everything else (YouTube, TikTok, Twitter, …)
+            print("   📥 Downloading via yt-dlp...")
+            result = subprocess.run(
+                [
+                    "yt-dlp",
+                    "-x", "--audio-format", "mp3",
+                    "-o", audio_path,
+                    source,
+                ],
+                capture_output=True, text=True,
+            )
+            if result.returncode != 0:
+                print(f"   ❌ yt-dlp error:\n{result.stderr.strip()}")
+                return None
+            input_path = audio_path
 
         print("   🎙️ Transcribing with Whisper...")
         model = WhisperModel("base", compute_type="int8")
-        segments, _ = model.transcribe(audio_path)
+        segments, _ = model.transcribe(input_path)
         transcript = " ".join(s.text for s in segments).strip()
 
     words = len(transcript.split())
@@ -70,8 +133,7 @@ def generate_scenario(transcript: str) -> str | None:
     prompt = f"{SCENARIO_PROMPT}\n\nТранскрипція:\n\n{transcript}\n\nСтвори сценарій рілса."
     result = subprocess.run(
         ["claude", "-p", prompt],
-        capture_output=True,
-        text=True,
+        capture_output=True, text=True,
     )
     if result.returncode != 0:
         print(f"   ❌ claude CLI error: {result.stderr.strip()}")
@@ -81,15 +143,15 @@ def generate_scenario(transcript: str) -> str | None:
 
 # ── Step 3: push to Airtable ──────────────────────────────────────────────────
 
-def push_to_airtable(reel_url: str, transcript: str, scenario: str) -> bool:
+def push_to_airtable(source: str, transcript: str, scenario: str) -> bool:
     if not AIRTABLE_API_KEY:
         print("❌ AIRTABLE_API_KEY not set")
         return False
 
     url = f"https://api.airtable.com/v0/{AIRTABLE_BASE_ID}/{AIRTABLE_TABLE_ID}"
     payload = json.dumps({"records": [{"fields": {
-        "Name": reel_url,
-        "Source URL": reel_url,
+        "Name": source,
+        "Source URL": source if source.startswith("http") else os.path.basename(source),
         "Transcription": transcript,
         "Scenario (UA)": scenario,
         "Date": datetime.now().strftime("%Y-%m-%d"),
@@ -109,11 +171,11 @@ def push_to_airtable(reel_url: str, transcript: str, scenario: str) -> bool:
 
 # ── Main ──────────────────────────────────────────────────────────────────────
 
-def run(reel_url: str) -> None:
-    print(f"\n🔗 {reel_url}\n")
+def run(source: str) -> None:
+    print(f"\n🔗 {source}\n")
 
     print("1️⃣  Transcribing...")
-    transcript = transcribe(reel_url)
+    transcript = transcribe(source)
     if not transcript:
         return
     print()
@@ -125,7 +187,7 @@ def run(reel_url: str) -> None:
     print("   ✓ Done\n")
 
     print("3️⃣  Saving to Airtable...")
-    if not push_to_airtable(reel_url, transcript, scenario):
+    if not push_to_airtable(source, transcript, scenario):
         return
     print("   ✓ Saved\n")
 
@@ -136,8 +198,8 @@ def run(reel_url: str) -> None:
 
 def main() -> None:
     if len(sys.argv) < 2:
-        print("Usage: python agent.py <reel_url>")
-        print("Example: python agent.py https://www.instagram.com/reel/...")
+        print(__doc__)
+        print("Usage: python agent.py <url-or-file-path>")
         sys.exit(1)
     run(sys.argv[1])
 
