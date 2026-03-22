@@ -54,6 +54,28 @@ Return ONLY a valid JSON object in this exact format — no prose, no markdown f
 
 Generate 2-3 ideas per platform. Be specific, platform-native, and actionable."""
 
+SCENARIO_PROMPT = """Ти — експерт зі створення вірусних Reels у ніші Tech/AI інструментів для україномовної аудиторії.
+
+Тобі дають транскрипцію або опис відео. Твоє завдання — створити повноцінний сценарій для власного рілса на цю тему.
+
+Адаптуй ідею під українського глядача, не копіюй оригінал — переосмисли її по-своєму.
+
+Поверни відповідь ТІЛЬКИ у такому форматі (без зайвого тексту):
+
+🎬 СЦЕНАРІЙ РІЛСА
+
+🪝 ХУК (0–3 секунди):
+[Одна потужна фраза, яка зупиняє скрол. Має викликати здивування або цікавість.]
+
+📝 ОСНОВНИЙ ТЕКСТ (озвучка):
+[Повний текст для озвучення. Розмовний стиль, короткі речення. 60–90 секунд.]
+
+🎥 ВІЗУАЛЬНІ ВКАЗІВКИ:
+[По кроках: що показувати на екрані в кожен момент. Конкретно і практично.]
+
+📣 ЗАКЛИК ДО ДІЇ:
+[Фінальна фраза + що зробити глядачу: підписатись, зберегти, написати в коментарях тощо.]"""
+
 
 # ── Backlog helpers ────────────────────────────────────────────────────────────
 
@@ -160,6 +182,35 @@ def extract_content(url: str) -> tuple[str, str]:
 
 
 # ── Idea generation ───────────────────────────────────────────────────────────
+
+def generate_scenario_api(content: str) -> str | None:
+    """Generate a Ukrainian reel scenario via Claude API."""
+    if not os.environ.get("ANTHROPIC_API_KEY"):
+        return None
+    try:
+        import anthropic
+    except ImportError:
+        return None
+
+    client = anthropic.Anthropic()
+    messages = [{"role": "user", "content": f"Ось транскрипція/опис відео:\n\n{content}\n\nСтвори сценарій мого рілса на цю тему."}]
+
+    while True:
+        response = client.messages.create(
+            model="claude-opus-4-6",
+            max_tokens=2048,
+            system=SCENARIO_PROMPT,
+            messages=messages,
+        )
+        if response.stop_reason == "pause_turn":
+            messages.append({"role": "assistant", "content": response.content})
+            continue
+        for block in response.content:
+            if block.type == "text":
+                return block.text.strip()
+        break
+    return None
+
 
 def generate_ideas_api(content: str) -> dict | None:
     """Use Claude API if ANTHROPIC_API_KEY is set."""
@@ -276,6 +327,52 @@ def cmd_add(content: str) -> None:
             print(content)
 
 
+def cmd_scenario(input_text: str) -> None:
+    """Transcribe a reel URL (or accept pasted text) and generate a Ukrainian scenario."""
+    is_url = input_text.strip().startswith(("http://", "https://"))
+
+    if is_url:
+        if not COOKIES_FILE.exists():
+            print("⚠️  cookies.txt not found — needed to download Instagram audio.")
+            print("   Or paste the transcript directly: python agent.py scenario \"your transcript\"")
+            return
+        print(f"⏳ Processing {input_text[:60]}...")
+        content, method = extract_content(input_text)
+        if not content:
+            print("❌ Could not extract content from URL.")
+            print("   Try: python agent.py scenario \"paste transcript here\"")
+            return
+        print(f"   ✓ Got content via {method}\n")
+    else:
+        content = input_text
+
+    print("🇺🇦 Generating Ukrainian reel scenario...\n")
+    scenario = generate_scenario_api(content)
+
+    if scenario:
+        print(scenario)
+        print()
+        # Optionally save to backlog as well
+        backlog = load_backlog()
+        entry = {
+            "id": len(backlog) + 1,
+            "date": datetime.now().isoformat(),
+            "source": input_text[:120],
+            "source_summary": content[:300],
+            "scenario_uk": scenario,
+            "ideas": {},
+            "status": "pending",
+        }
+        backlog.append(entry)
+        save_backlog(backlog)
+        print(f"✅ Saved to backlog as entry #{entry['id']}")
+    else:
+        print("── Paste this into Claude Code to generate the scenario ──")
+        print(content)
+        print("─" * 60)
+        print("Prompt: Створи сценарій рілса на цю тему українською мовою з хуком, основним текстом, візуальними вказівками та CTA.")
+
+
 def cmd_airtable() -> None:
     """Sync all backlog entries to Airtable — one row per idea."""
     api_key = os.environ.get("AIRTABLE_API_KEY")
@@ -371,8 +468,8 @@ def _write_entry(source: str, data: dict) -> None:
 
 
 def interactive() -> None:
-    print("🎯 Content Backlog Agent")
-    print("Paste any content, URL, or social media link")
+    print("🎯 Reel Scenario Generator")
+    print("Paste a reel URL or transcript → get a Ukrainian scenario")
     print("Commands: 'list' to view backlog, 'quit' to exit\n")
 
     while True:
@@ -388,8 +485,10 @@ def interactive() -> None:
             break
         if content.lower() == "list":
             cmd_list()
+        elif content.lower().startswith("scenario "):
+            cmd_scenario(content[9:].strip())
         else:
-            cmd_add(content)
+            cmd_scenario(content)
 
 
 def main() -> None:
@@ -398,6 +497,8 @@ def main() -> None:
         interactive()
     elif args[0] == "list":
         cmd_list()
+    elif args[0] == "scenario" and len(args) > 1:
+        cmd_scenario(" ".join(args[1:]))
     elif args[0] == "airtable":
         cmd_airtable()
     elif args[0] == "save" and len(args) > 1:
