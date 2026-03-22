@@ -11,7 +11,6 @@ from datetime import datetime
 AIRTABLE_API_KEY  = os.environ.get("AIRTABLE_API_KEY",  "")
 AIRTABLE_BASE_ID  = os.environ.get("AIRTABLE_BASE_ID",  "app4Nttqp62S6EbWj")
 AIRTABLE_TABLE_ID = os.environ.get("AIRTABLE_TABLE_ID", "tblzsGkdWedM5hAgT")
-TRANSCRIPT24_KEY  = os.environ.get("TRANSCRIPT24_API_KEY", "")
 ANTHROPIC_KEY     = os.environ.get("ANTHROPIC_API_KEY", "")
 
 SCENARIO_PROMPT = """Ти — експерт зі створення вірусних Reels у ніші Tech/AI інструментів для україномовної аудиторії.
@@ -34,40 +33,32 @@ SCENARIO_PROMPT = """Ти — експерт зі створення вірус�
 [Фінальна фраза + що зробити глядачу.]"""
 
 
-# ── Step 1: transcribe via Transcript24 ──────────────────────────────────────
+# ── Step 1: transcribe via yt-dlp + faster-whisper ───────────────────────────
 
 def transcribe(reel_url: str) -> str | None:
-    if not TRANSCRIPT24_KEY:
-        print("❌ TRANSCRIPT24_API_KEY not set")
-        return None
+    import tempfile
+    import subprocess
+    from faster_whisper import WhisperModel
 
-    print("   📤 Sending to Transcript24...")
-    payload = json.dumps({"url": reel_url, "prefer": "auto"}).encode()
-    req = urllib.request.Request(
-        "https://api.transcript24.com/transcribe",
-        data=payload,
-        headers={
-            "Authorization": f"Bearer {TRANSCRIPT24_KEY}",
-            "Content-Type": "application/json",
-        },
-        method="POST",
-    )
-    try:
-        with urllib.request.urlopen(req) as resp:
-            data = json.loads(resp.read())
-    except urllib.error.HTTPError as e:
-        print(f"   ❌ Transcript24 error {e.code}: {e.read().decode()}")
-        return None
+    with tempfile.TemporaryDirectory() as tmpdir:
+        audio_path = f"{tmpdir}/audio.mp3"
 
-    captions = data.get("caption", [])
-    if not captions:
-        print("   ❌ No captions returned")
-        return None
+        print("   📥 Downloading audio...")
+        result = subprocess.run(
+            ["yt-dlp", "-x", "--audio-format", "mp3", "-o", audio_path, reel_url],
+            capture_output=True, text=True,
+        )
+        if result.returncode != 0:
+            print(f"   ❌ yt-dlp error: {result.stderr.strip()}")
+            return None
 
-    transcript = " ".join(c["text"] for c in captions).strip()
-    mode = data.get("mode", "?")
+        print("   🎙️ Transcribing with Whisper...")
+        model = WhisperModel("base", compute_type="int8")
+        segments, _ = model.transcribe(audio_path)
+        transcript = " ".join(s.text for s in segments).strip()
+
     words = len(transcript.split())
-    print(f"   ✓ {words} words (mode: {mode})")
+    print(f"   ✓ {words} words")
     return transcript
 
 
