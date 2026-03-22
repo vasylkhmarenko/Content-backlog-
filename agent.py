@@ -71,36 +71,21 @@ def transcribe(reel_url: str) -> str | None:
     return transcript
 
 
-# ── Step 2: generate Ukrainian scenario via Claude ────────────────────────────
+# ── Step 2: generate Ukrainian scenario via Claude Code CLI ───────────────────
 
 def generate_scenario(transcript: str) -> str | None:
-    if not ANTHROPIC_KEY:
-        print("❌ ANTHROPIC_API_KEY not set")
-        return None
-    try:
-        import anthropic
-    except ImportError:
-        print("❌ Run: pip install anthropic")
-        return None
+    import subprocess
 
-    client = anthropic.Anthropic(api_key=ANTHROPIC_KEY)
-    messages = [{"role": "user", "content": f"Транскрипція:\n\n{transcript}\n\nСтвори сценарій рілса."}]
-
-    while True:
-        response = client.messages.create(
-            model="claude-opus-4-6",
-            max_tokens=2048,
-            system=SCENARIO_PROMPT,
-            messages=messages,
-        )
-        if response.stop_reason == "pause_turn":
-            messages.append({"role": "assistant", "content": response.content})
-            continue
-        for block in response.content:
-            if block.type == "text":
-                return block.text.strip()
-        break
-    return None
+    prompt = f"{SCENARIO_PROMPT}\n\nТранскрипція:\n\n{transcript}\n\nСтвори сценарій рілса."
+    result = subprocess.run(
+        ["claude", "-p", prompt],
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        print(f"   ❌ claude CLI error: {result.stderr.strip()}")
+        return None
+    return result.stdout.strip()
 
 
 # ── Step 3: push to Airtable ──────────────────────────────────────────────────
