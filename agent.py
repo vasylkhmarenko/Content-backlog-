@@ -9,6 +9,7 @@ import sys
 import tempfile
 import urllib.request
 import urllib.parse
+import urllib.error
 from datetime import datetime
 from pathlib import Path
 
@@ -275,6 +276,75 @@ def cmd_add(content: str) -> None:
             print(content)
 
 
+def cmd_airtable() -> None:
+    """Sync all backlog entries to Airtable — one row per idea."""
+    api_key = os.environ.get("AIRTABLE_API_KEY")
+    base_id = os.environ.get("AIRTABLE_BASE_ID")
+    table_name = os.environ.get("AIRTABLE_TABLE_NAME", "Content Backlog")
+
+    if not api_key or not base_id:
+        print("❌ Missing environment variables. Set these before running:")
+        print("   export AIRTABLE_API_KEY=your_personal_access_token")
+        print("   export AIRTABLE_BASE_ID=appXXXXXXXXXXXXXX")
+        print("   export AIRTABLE_TABLE_NAME='Content Backlog'  # optional, default used if omitted")
+        print("\nGet your token at: https://airtable.com/create/tokens")
+        print("Find your Base ID in the API docs: https://airtable.com/api")
+        return
+
+    backlog = load_backlog()
+    if not backlog:
+        print("Backlog is empty — nothing to sync.")
+        return
+
+    # Flatten entries → one record per idea
+    records = []
+    platform_labels = {"instagram": "Instagram", "youtube": "YouTube", "threads": "Threads"}
+    for entry in backlog:
+        for platform_key, platform_label in platform_labels.items():
+            for idea in entry.get("ideas", {}).get(platform_key, []):
+                records.append({
+                    "fields": {
+                        "Platform": platform_label,
+                        "Title": idea.get("title", ""),
+                        "Format": idea.get("format", ""),
+                        "Description": idea.get("description", ""),
+                        "Source Summary": entry.get("source_summary", ""),
+                        "Source": entry.get("source", ""),
+                        "Status": entry.get("status", "pending"),
+                        "Date": entry.get("date", "")[:10],
+                        "Entry ID": str(entry.get("id", "")),
+                    }
+                })
+
+    if not records:
+        print("No ideas found in backlog.")
+        return
+
+    # Airtable allows max 10 records per request
+    url = f"https://api.airtable.com/v0/{base_id}/{urllib.parse.quote(table_name)}"
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json",
+    }
+
+    pushed = 0
+    for i in range(0, len(records), 10):
+        batch = records[i:i + 10]
+        payload = json.dumps({"records": batch}).encode()
+        req = urllib.request.Request(url, data=payload, headers=headers, method="POST")
+        try:
+            with urllib.request.urlopen(req) as resp:
+                result = json.loads(resp.read())
+                pushed += len(result.get("records", []))
+        except urllib.error.HTTPError as e:
+            body = e.read().decode()
+            print(f"❌ Airtable error {e.code}: {body}")
+            return
+
+    print(f"✅ Synced {pushed} ideas to Airtable → {table_name}")
+    print(f"   Base: {base_id}")
+
+
 def cmd_save(json_str: str) -> None:
     """Save pre-generated JSON ideas directly (for use without API key)."""
     try:
@@ -329,6 +399,8 @@ def main() -> None:
         interactive()
     elif args[0] == "list":
         cmd_list()
+    elif args[0] == "airtable":
+        cmd_airtable()
     elif args[0] == "save" and len(args) > 1:
         cmd_save(" ".join(args[1:]))
     else:
