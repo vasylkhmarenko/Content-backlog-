@@ -188,6 +188,30 @@ def interactive() -> None:
             cmd_add(content)
 
 
+def cmd_save(json_str: str) -> None:
+    """Save pre-generated JSON ideas directly (for use without API key)."""
+    try:
+        data = json.loads(json_str)
+    except json.JSONDecodeError as e:
+        print(f"❌ Invalid JSON: {e}")
+        return
+
+    backlog = load_backlog()
+    entry = {
+        "id": len(backlog) + 1,
+        "date": datetime.now().isoformat(),
+        "source": data.get("source", ""),
+        "source_summary": data.get("source_summary", ""),
+        "ideas": data.get("ideas", {}),
+        "status": "pending",
+    }
+    backlog.append(entry)
+    save_backlog(backlog)
+
+    print_entry(entry)
+    print(f"\n✅ Saved to backlog as entry #{entry['id']}")
+
+
 def main() -> None:
     args = sys.argv[1:]
 
@@ -195,6 +219,8 @@ def main() -> None:
         interactive()
     elif args[0] == "list":
         cmd_list()
+    elif args[0] == "save" and len(args) > 1:
+        cmd_save(" ".join(args[1:]))
     else:
         cmd_add(" ".join(args))
 
