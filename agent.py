@@ -16,6 +16,18 @@ BACKLOG_FILE = Path("backlog.json")
 COOKIES_FILE = Path("cookies.txt")
 WHISPER_MODEL = "base"  # tiny | base | small | medium | large
 
+
+def _ensure_ffmpeg() -> None:
+    """Add static ffmpeg to PATH if system ffmpeg is unavailable."""
+    import shutil
+    if shutil.which("ffmpeg"):
+        return
+    try:
+        import static_ffmpeg
+        static_ffmpeg.add_paths()
+    except ImportError:
+        pass
+
 SYSTEM_PROMPT = """You are a creative content strategist for a personal creator.
 
 Analyze the provided content and generate specific, actionable content ideas for:
@@ -76,6 +88,7 @@ def fetch_metadata(url: str) -> dict | None:
 
 
 def transcribe_audio(url: str) -> str | None:
+    _ensure_ffmpeg()
     """Download audio from URL and transcribe with Whisper."""
     try:
         import whisper
