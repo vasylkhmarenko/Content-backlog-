@@ -304,15 +304,14 @@ def cmd_airtable() -> None:
             for idea in entry.get("ideas", {}).get(platform_key, []):
                 records.append({
                     "fields": {
+                        "Name": idea.get("title", ""),
                         "Platform": platform_label,
-                        "Title": idea.get("title", ""),
                         "Format": idea.get("format", ""),
                         "Description": idea.get("description", ""),
                         "Source Summary": entry.get("source_summary", ""),
                         "Source": entry.get("source", ""),
-                        "Status": entry.get("status", "pending"),
                         "Date": entry.get("date", "")[:10],
-                        "Entry ID": str(entry.get("id", "")),
+                        "Entry ID": int(entry.get("id", 0)),
                     }
                 })
 
